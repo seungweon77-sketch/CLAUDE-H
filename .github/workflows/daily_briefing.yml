@@ -1,0 +1,35 @@
+yaml
+name: Market Mentor Daily Briefing
+
+on:
+  schedule:
+    - cron: '30 21 * * 0-4'   # KST 월~금 06:30 (UTC 기준)
+  workflow_dispatch:           # 수동 실행 버튼 활성화
+
+jobs:
+  send-briefing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install yfinance feedparser requests
+
+      - name: Run Market Mentor
+        env:
+          TG_TOKEN:        ${{ secrets.TG_TOKEN }}
+          TG_CHAT:         ${{ secrets.TG_CHAT }}
+          GMAIL_USER:      ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PW:    ${{ secrets.GMAIL_APP_PW }}
+          MAIL_TO:         ${{ secrets.MAIL_TO }}
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          SLACK_WEBHOOK:   ${{ secrets.SLACK_WEBHOOK }}
+        run: python market_mentor.py
