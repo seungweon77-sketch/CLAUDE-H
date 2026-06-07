@@ -232,10 +232,29 @@ def collect_all() -> dict:
 
 def build_column(data: dict) -> str:
     """
-    수집 데이터를 근거로 투자자 행동 칼럼을 자동 생성.
-    시장 진단 → 포트폴리오 점검 → 오늘의 액션 → 리스크 경고 4개 섹션.
-    모든 문장은 실제 수치에 근거하며 근거 없는 문장은 출력하지 않음.
+    에디 스타일 투자 칼럼 자동 생성.
+    짧고 강렬한 문장, 컬러 수치, 스토리 흐름: 사건 → 원인 → 종목 명암 → 액션.
     """
+    # ── 스타일 헬퍼 ───────────────────────────────────────────────────────
+    def neg(t):  return f"<strong style='color:#e53935;'>{t}</strong>"
+    def pos(t):  return f"<strong style='color:#43a047;'>{t}</strong>"
+    def em(t):   return f"<strong>{t}</strong>"
+    def p(t, size=15, mb=14, col="#222"):
+        return (f"<p style='margin:0 0 {mb}px;font-size:{size}px;"
+                f"color:{col};line-height:1.9;'>{t}</p>")
+    def hr():
+        return "<hr style='border:none;border-top:1px solid #eee;margin:18px 0;'>"
+    def badge(items):
+        return "".join(
+            f"<p style='margin:0 0 8px;font-size:14px;color:#222;line-height:1.75;'>"
+            f"<span style='color:#777;margin-right:5px;'>▍</span>{it}</p>"
+            for it in items)
+    def sc(v):
+        """에디 스타일 수치: 음수=빨강, 양수=초록"""
+        if v is None: return "N/A"
+        s = f"{v:+.2f}%"
+        return neg(s) if v < 0 else pos(s)
+
     # ── 핵심 지표 추출 ─────────────────────────────────────────────────────
     nasdaq  = data.get("macro",  {}).get("나스닥",            {})
     sp500   = data.get("macro",  {}).get("S&P 500",           {})
@@ -263,230 +282,476 @@ def build_column(data: dict) -> str:
         if h.get("ok") and h.get("chg") is not None:
             weighted += h["chg"] * h["buy"]
             w_sum    += h["buy"]
-    port_chg   = (weighted / w_sum) if w_sum else None
-    total_buy  = sum(h["buy"] for h in holdings)
+    port_chg  = (weighted / w_sum) if w_sum else None
+    total_buy = sum(h["buy"] for h in holdings) or 1
 
     # 레버리지 비중
     lev_buy   = sum(h["buy"] for h in holdings
                     if any(k in h["name"] for k in ["3배", "2배"]))
-    lev_ratio = (lev_buy / total_buy * 100) if total_buy else 0
+    lev_ratio = lev_buy / total_buy * 100
 
-    # 개별 종목 등락 dict
-    hold_map = {h["name"]: h for h in holdings}
-
-    # 섹터 트랙별 평균 등락
-    a_chgs = [s["chg"] for s in secs if s["track"]=="A" and s.get("ok") and s["chg"] is not None]
-    b_chgs = [s["chg"] for s in secs if s["track"]=="B" and s.get("ok") and s["chg"] is not None]
-    a_avg  = sum(a_chgs)/len(a_chgs) if a_chgs else None
-    b_avg  = sum(b_chgs)/len(b_chgs) if b_chgs else None
-
-    # 상위·하위 섹터
-    valid_secs = sorted([s for s in secs if s.get("ok") and s["chg"] is not None],
+    # 섹터 정렬
+    valid_secs = sorted([s for s in secs if s.get("ok") and s.get("chg") is not None],
                         key=lambda x: x["chg"], reverse=True)
     top_sec = valid_secs[0]  if valid_secs else None
     bot_sec = valid_secs[-1] if valid_secs else None
+    a_chgs  = [s["chg"] for s in secs if s.get("track") == "A"
+               and s.get("ok") and s.get("chg") is not None]
+    b_chgs  = [s["chg"] for s in secs if s.get("track") == "B"
+               and s.get("ok") and s.get("chg") is not None]
+    a_avg   = sum(a_chgs) / len(a_chgs) if a_chgs else None
+    b_avg   = sum(b_chgs) / len(b_chgs) if b_chgs else None
 
-    # ── 섹션 1: 시장 진단 ─────────────────────────────────────────────────
-    diag = []
+    # 보유종목 등락 정렬
+    h_valid  = [h for h in holdings if h.get("ok") and h.get("chg") is not None]
+    h_sorted = sorted(h_valid, key=lambda x: x["chg"], reverse=True)
+    h_up   = [h for h in h_sorted if h["chg"] >= 0]
+    h_down = [h for h in h_sorted if h["chg"] <  0]
 
-    # 나스닥 방향
+    # 뉴스 데이터 (보유종목 헤드라인)
+    news_data = data.get("news", {})
+
+    # ── 칼럼 본문 구성 ──────────────────────────────────────────────────────
+    parts = []
+
+    # ══════════════════════════════════════════════════
+    # ① 리드 — 어제 시장, 한 줄 요약 + 3대 지수 종합
+    # ══════════════════════════════════════════════════
+    sp_chg  = sp500.get("chg")
+    dow_d   = data.get("macro", {})
+    dow_chg = None
+    for _k, _v in dow_d.items():
+        if "다우" in _k or "DOW" in _k.upper():
+            dow_chg = _v.get("chg") if isinstance(_v, dict) else None
+            break
+
     if nas_chg is not None:
-        if nas_chg >= 1.5:
-            diag.append(f"전일 나스닥은 {nas_chg:+.2f}%로 강하게 상승 마감했습니다. "
-                        "빅테크 중심의 매수세가 지속되고 있으며, 단기 모멘텀은 긍정적입니다.")
-        elif nas_chg >= 0.3:
-            diag.append(f"전일 나스닥은 {nas_chg:+.2f}% 소폭 상승했습니다. "
-                        "방향성은 유지되고 있으나 추세 강도는 크지 않습니다.")
-        elif nas_chg >= -0.3:
-            diag.append(f"전일 나스닥은 {nas_chg:+.2f}%로 보합 마감했습니다. "
-                        "뚜렷한 방향성 없이 관망세가 이어지는 구간입니다.")
-        elif nas_chg >= -1.5:
-            diag.append(f"전일 나스닥이 {nas_chg:+.2f}%로 하락했습니다. "
-                        "단기 매도 압력이 감지되며, 추가 하락 여부를 확인해야 합니다.")
+        if nas_chg <= -3.0:
+            parts += [
+                p(f"나스닥이 {neg(f'{nas_chg:+.2f}%')} 폭락했습니다."),
+                p("장 초반부터 마감까지, 전형적인 패닉셀 흐름이었습니다.", col="#555"),
+            ]
+        elif nas_chg <= -1.5:
+            parts += [
+                p(f"나스닥이 {neg(f'{nas_chg:+.2f}%')} 하락 마감했습니다."),
+                p("기술주 전반에 매도 압력이 거셌습니다.", col="#555"),
+            ]
+        elif nas_chg <= -0.3:
+            parts += [
+                p(f"나스닥은 {neg(f'{nas_chg:+.2f}%')}, 소폭 하락 마감했습니다."),
+                p("방향성은 아직 결정되지 않은 구간입니다.", col="#555"),
+            ]
+        elif nas_chg < 0.3:
+            parts += [
+                p(f"나스닥은 {sc(nas_chg)}, 보합 마감했습니다."),
+                p("뚜렷한 모멘텀 없이 관망세가 지배한 하루였습니다.", col="#555"),
+            ]
+        elif nas_chg < 2.0:
+            parts += [
+                p(f"나스닥이 {pos(f'{nas_chg:+.2f}%')} 상승 마감했습니다."),
+                p("기술주 중심으로 매수세가 이어졌습니다.", col="#555"),
+            ]
         else:
-            diag.append(f"전일 나스닥이 {nas_chg:+.2f}%로 급락했습니다. "
-                        "패닉셀 가능성을 배제할 수 없으며 레버리지 포지션 점검이 긴급합니다.")
+            parts += [
+                p(f"나스닥이 {pos(f'{nas_chg:+.2f}%')} 강하게 반등했습니다."),
+                p("위험자산 선호 심리가 살아난 하루였습니다.", col="#555"),
+            ]
 
-    # 금리 방향 코멘트
-    if tnx_chg is not None and tnx_last is not None:
-        if tnx_chg > 0.05:
-            diag.append(f"미국 10년물 금리가 {tnx_last:.3f}%({tnx_chg:+.3f}%p)로 상승했습니다. "
-                        "금리 상승은 성장주·레버리지 ETF 밸류에이션에 직접적인 역풍입니다.")
-        elif tnx_chg < -0.05:
-            diag.append(f"미국 10년물 금리가 {tnx_last:.3f}%({tnx_chg:+.3f}%p)로 하락했습니다. "
-                        "금리 하락은 성장주 중심 현 포트폴리오에 우호적인 환경입니다.")
-
-    # 환율 코멘트
-    if fx_chg is not None and fx_last is not None:
-        if fx_chg > 0.5:
-            diag.append(f"원/달러 환율이 {fx_last:,.0f}원({fx_chg:+.2f}%)으로 원화 약세입니다. "
-                        "달러 자산 보유 비중이 높아 환산 수익이 추가로 발생합니다.")
-        elif fx_chg < -0.5:
-            diag.append(f"원/달러 환율이 {fx_last:,.0f}원({fx_chg:+.2f}%)으로 원화 강세입니다. "
-                        "달러 자산의 원화 환산 수익률이 일부 희석됩니다.")
-
-    # 선물 방향
-    if nq_chg is not None:
-        if nq_chg >= 0.3:
-            diag.append(f"나스닥 선물은 현재 {nq_chg:+.2f}%로 강보합권입니다. "
-                        "오늘 장 초반 긍정적 흐름이 예상됩니다.")
-        elif nq_chg <= -0.3:
-            diag.append(f"나스닥 선물은 {nq_chg:+.2f}%로 하락 중입니다. "
-                        "오늘 장 초반 변동성 확대에 대비하세요.")
-
-    # ── 섹션 2: 포트폴리오 점검 ──────────────────────────────────────────
-    pfcheck = []
-
-    # 포트폴리오 전체 등락
-    if port_chg is not None:
-        if port_chg >= 2.0:
-            pfcheck.append(
-                f"내 포트폴리오는 전일 {port_chg:+.2f}% 상승했습니다. "
-                "단기 수익이 누적된 구간에서는 레버리지 ETF의 일부 차익실현이 "
-                "리스크 관리 관점에서 유효합니다.")
-        elif port_chg >= 0:
-            pfcheck.append(
-                f"내 포트폴리오는 {port_chg:+.2f}% 소폭 상승했습니다. "
-                "현재 포지션을 유지하되 선물 방향을 재확인하세요.")
-        elif port_chg >= -2.0:
-            pfcheck.append(
-                f"내 포트폴리오는 {port_chg:+.2f}% 하락했습니다. "
-                "손실 원인이 시장 전반인지 개별 종목인지 섹터 흐름과 대조해 확인하세요.")
-        else:
-            pfcheck.append(
-                f"내 포트폴리오가 {port_chg:+.2f}%로 큰 폭 하락했습니다. "
-                "레버리지 ETF 비중을 즉시 점검하고, 추가 손실 시 손절 기준을 재설정하세요.")
-
-    # 레버리지 비중 경고
-    if lev_ratio >= 25:
-        pfcheck.append(
-            f"레버리지 ETF(SOXL·TQQQ·TSLL) 합산 비중이 {lev_ratio:.1f}%로 높습니다. "
-            "지수가 3% 하락하면 레버리지 포지션은 최대 9% 손실이 발생합니다. "
-            "변동성 장세에서는 비중을 15~20% 이내로 유지하는 것이 원칙입니다.")
-    elif lev_ratio >= 15:
-        pfcheck.append(
-            f"레버리지 ETF 비중은 {lev_ratio:.1f}%입니다. "
-            "나스닥 선물이 하락 중이라면 오늘 장중 비중 조정을 고려하세요.")
-
-    # SOX와 국내 반도체 연관성
+    # 3대 지수 종합 코멘트
+    index_lines = []
+    if sp_chg is not None:
+        sp_s = f"{sp_chg:+.2f}%"
+        index_lines.append(
+            f"{em('S&P 500')} {neg(sp_s) if sp_chg < 0 else pos(sp_s)}")
+    if dow_chg is not None:
+        dow_s = f"{dow_chg:+.2f}%"
+        index_lines.append(
+            f"{em('다우존스')} {neg(dow_s) if dow_chg < 0 else pos(dow_s)}")
     if sox_chg is not None:
-        hi  = hold_map.get("SK하이닉스",  {})
-        sam = hold_map.get("삼성전자",     {})
-        if sox_chg < -1.0:
-            pfcheck.append(
-                f"필라델피아 반도체 지수가 {sox_chg:+.2f}% 하락했습니다. "
-                "SK하이닉스·삼성전자는 SOX와 강하게 동조하므로 "
-                "오늘 국내장 개장 시 추가 하방 압력이 예상됩니다.")
-        elif sox_chg >= 1.5:
-            pfcheck.append(
-                f"필라델피아 반도체 지수가 {sox_chg:+.2f}% 강세입니다. "
-                "SK하이닉스·삼성전자의 오늘 상승 개장 가능성이 높습니다.")
+        sox_s = f"{sox_chg:+.2f}%"
+        index_lines.append(
+            f"{em('필라델피아 반도체(SOX)')} {neg(sox_s) if sox_chg < 0 else pos(sox_s)}")
 
-    # 섹터 로테이션 신호
-    if a_avg is not None and b_avg is not None:
-        if b_avg > a_avg + 0.5:
-            pfcheck.append(
-                f"방어 섹터(헬스케어·금융 등) 평균이 {b_avg:+.2f}%로 "
-                f"성장 섹터({a_avg:+.2f}%)를 {b_avg-a_avg:.2f}%p 앞서고 있습니다. "
-                "자금이 성장주에서 방어주로 이동하는 로테이션 신호입니다. "
-                "이런 구간에서는 레버리지 성장주 비중 축소가 유리합니다.")
-        elif a_avg > b_avg + 0.5:
-            pfcheck.append(
-                f"성장·기술 섹터 평균이 {a_avg:+.2f}%로 방어 섹터({b_avg:+.2f}%)를 "
-                f"{a_avg-b_avg:.2f}%p 앞서고 있습니다. "
-                "현 포트폴리오 방향과 시장 흐름이 일치합니다.")
+    if index_lines:
+        parts.append(badge(index_lines))
 
-    # ── 섹션 3: 오늘의 액션 ───────────────────────────────────────────────
+    all_chgs = [c for c in [nas_chg, sp_chg, dow_chg] if c is not None]
+    if all_chgs:
+        if all(c < -1.0 for c in all_chgs):
+            parts.append(p(
+                "세 지수 모두 장 초반부터 마감까지 우하향이었습니다. "
+                "단순 섹터 이슈가 아닌, 시장 전반의 위험회피가 작동했습니다.",
+                col="#555"))
+        elif all(c > 0.5 for c in all_chgs):
+            parts.append(p(
+                "세 지수가 모두 상승 마감했습니다. "
+                "위험자산 전반에 매수세가 고르게 유입됐습니다.", col="#555"))
+
+    parts.append(hr())
+
+    # ══════════════════════════════════════════════════
+    # ② 원인 분석 — 금리 / 환율 / 유가 3각 분석
+    # ══════════════════════════════════════════════════
+    cause_added = False
+    tnx_str = f"{tnx_last:.2f}%" if tnx_last else "?"
+
+    if tnx_chg is not None and abs(tnx_chg) >= 0.04:
+        cause_added = True
+        if tnx_chg > 0:
+            parts += [
+                p(f"원인의 중심에는 {em('금리')}가 있었습니다."),
+                p(f"미국 10년물 국채 금리가 {neg(f'+{tnx_chg:.3f}%p')} 급등하며 "
+                  f"{em(tnx_str)}까지 올랐습니다."),
+                p("금리 상승은 성장주의 미래 수익을 현재 가치로 환산할 때 "
+                  "할인율을 높입니다.", col="#555"),
+                p("주가 계산식에서 분모가 커지면 주가가 내려갑니다. "
+                  "기술주에 직격탄인 이유입니다.", col="#555"),
+            ]
+            if tnx_last is not None and tnx_last >= 4.5:
+                parts.append(p(
+                    f"특히 금리 {tnx_str} 구간은 역사적으로 "
+                    "나스닥 멀티플 압축이 본격화되는 임계치입니다.",
+                    col="#e53935"))
+        else:
+            parts += [
+                p(f"10년물 국채 금리가 {pos(f'{tnx_chg:.3f}%p')} 하락, "
+                  f"{em(tnx_str)}로 안정됐습니다."),
+                p("금리 부담이 완화되며 성장주 밸류에이션에 숨통이 트였습니다.",
+                  col="#555"),
+                p("금리가 내려가면 성장주의 미래 수익 할인율이 낮아져 "
+                  "현재 주가를 더 높게 평가할 수 있게 됩니다.", col="#555"),
+            ]
+
+    if fx_chg is not None and abs(fx_chg) >= 0.3:
+        cause_added = True
+        fx_str = f"{fx_last:,.0f}원" if fx_last else "?"
+        if fx_chg > 0:
+            parts += [
+                p(f"원/달러 환율은 {neg(f'+{fx_chg:.1f}원')} 올라 {em(fx_str)}입니다."),
+                p("원화 약세 구간입니다.", col="#555"),
+                p("달러 자산 보유자 입장에선 환차익이 발생하지만, "
+                  "급격한 약세는 외국인 자금 이탈의 신호이기도 합니다.", col="#555"),
+            ]
+        else:
+            parts += [
+                p(f"원/달러 환율은 {pos(f'{fx_chg:.1f}원')} 내린 {em(fx_str)}입니다."),
+                p("원화 강세 — 달러 자산의 원화 환산 수익이 일부 희석됩니다.",
+                  col="#555"),
+            ]
+
+    wti_d   = data.get("macro2", {})
+    wti_chg = None
+    wti_last_v = None
+    for _k, _v in wti_d.items():
+        if "WTI" in _k.upper() or "유가" in _k:
+            if isinstance(_v, dict):
+                wti_chg    = _v.get("chg")
+                wti_last_v = _v.get("last")
+            break
+    if wti_chg is not None and abs(wti_chg) >= 1.5:
+        cause_added = True
+        wti_s = f"{wti_last_v:.2f}" if wti_last_v else "?"
+        if wti_chg < 0:
+            parts.append(p(
+                f"WTI 유가는 {neg(f'{wti_chg:+.1f}%')} 내려 ${wti_s}입니다. "
+                "원자재 수요 둔화 우려가 반영되고 있습니다.", col="#555"))
+        else:
+            parts.append(p(
+                f"WTI 유가는 {pos(f'{wti_chg:+.1f}%')} 올라 ${wti_s}입니다. "
+                "에너지 인플레이션 압력이 다시 고개를 들고 있습니다.", col="#555"))
+
+    if cause_added:
+        parts.append(hr())
+
+    # ══════════════════════════════════════════════════
+    # ③ 반도체 / SOX 별도 진단
+    # ══════════════════════════════════════════════════
+    sox_names = ["SOXL", "SOX", "반도체", "SK하이닉스", "삼성전자", "NVDA", "엔비디아"]
+    has_semi = any(any(k in h.get("name", "") for k in sox_names) for h in holdings)
+
+    if sox_chg is not None and has_semi:
+        sox_s = f"{sox_chg:+.2f}%"
+        if sox_chg <= -3.0:
+            parts += [
+                p(f"{em('반도체 섹터')}를 따로 짚어봐야 합니다."),
+                p(f"필라델피아 반도체 지수(SOX)가 {neg(sox_s)} 폭락했습니다."),
+                p("반도체발 투매가 기술주 전체로 번지는 패턴입니다.", col="#555"),
+                p("SOXL은 SOX의 3배 추종이므로, 이날 손실이 배로 확대됩니다.", col="#555"),
+            ]
+        elif sox_chg <= -1.5:
+            parts += [
+                p(f"필라델피아 반도체 지수가 {neg(sox_s)} 하락했습니다."),
+                p("SK하이닉스·삼성전자는 SOX와 강하게 동조합니다. "
+                  "오늘 국내장에도 하방 압력이 예상됩니다.", col="#555"),
+            ]
+        elif sox_chg >= 2.0:
+            parts += [
+                p(f"필라델피아 반도체 지수가 {pos(sox_s)} 강하게 올랐습니다."),
+                p("반도체 모멘텀이 살아있습니다. "
+                  "SOXL·SK하이닉스 보유 비중에 긍정적인 환경입니다.", col="#555"),
+            ]
+        parts.append(hr())
+
+    # ══════════════════════════════════════════════════
+    # ④ 내 포트폴리오 명암 — 종목별 등락
+    # ══════════════════════════════════════════════════
+    if h_sorted:
+        parts.append(p(f"{em('내 포트폴리오')} 어떻게 됐을까요."))
+
+        if port_chg is not None:
+            port_s = f"{port_chg:+.2f}%"
+            if port_chg < -2.0:
+                parts += [
+                    p(f"가중평균 기준 {neg(port_s)} 하락했습니다."),
+                    p("레버리지 종목이 낙폭을 크게 키웠습니다.", col="#555"),
+                ]
+            elif port_chg < 0:
+                parts.append(p(f"가중평균 기준 {neg(port_s)} 소폭 하락했습니다."))
+            elif port_chg >= 2.0:
+                parts += [
+                    p(f"가중평균 기준 {pos(port_s)} 강하게 올랐습니다."),
+                    p("레버리지 종목이 수익을 크게 끌어올린 하루였습니다.", col="#555"),
+                ]
+            else:
+                parts.append(p(f"가중평균 기준 {pos(port_s)} 상승 마감했습니다."))
+
+        if h_down:
+            parts.append(p("가장 많이 빠진 종목들입니다.", col="#555"))
+            down_items = []
+            for h in h_down[:6]:
+                h_nm  = h["name"]
+                h_ch  = h["chg"]
+                lev_tag  = " (3배 레버리지)" if "3배" in h_nm else ""
+                h_news   = news_data.get(h_nm, [])
+                news_hint = ""
+                if h_news:
+                    hn = h_news[0][:28] + "..." if len(h_news[0]) > 28 else h_news[0]
+                    news_hint = f" — {hn}"
+                down_items.append(
+                    f"{neg(h_nm)}{lev_tag}({h_ch:+.2f}%){news_hint}")
+            parts.append(badge(down_items))
+
+        if h_up:
+            parts.append(p("그나마 버텨준 종목들입니다.", col="#555"))
+            up_items = []
+            for h in h_up[:4]:
+                h_nm = h["name"]
+                h_ch = h["chg"]
+                up_items.append(f"{pos(h_nm)}({h_ch:+.2f}%)")
+            parts.append(badge(up_items))
+
+        if lev_ratio >= 20:
+            lev_s  = f"{lev_ratio:.0f}%"
+            loss_s = f"{lev_ratio * 0.3:.0f}%"
+            parts.append(p(
+                f"현재 레버리지 ETF 비중은 {em(lev_s)}입니다. "
+                f"지수가 -3% 빠지면 레버리지 포지션만으로 최대 {neg(f'-{loss_s}')} 손실이 "
+                "발생할 수 있습니다.",
+                col="#c62828"))
+
+        parts.append(hr())
+
+    # ══════════════════════════════════════════════════
+    # ⑤ 섹터 로테이션 — 돈은 어디로 이동했나
+    # ══════════════════════════════════════════════════
+    if valid_secs:
+        parts.append(p(f"{em('자금은 어디로 움직였을까요.')}"))
+
+        top3 = valid_secs[:3]
+        bot3 = valid_secs[-3:]
+
+        top_items = [f"{pos(s['name'])} ({s['chg']:+.2f}%)" for s in top3]
+        bot_items = [f"{neg(s['name'])} ({s['chg']:+.2f}%)" for s in bot3]
+
+        parts.append(p("강세 섹터", col="#43a047", mb=6))
+        parts.append(badge(top_items))
+        parts.append(p("약세 섹터", col="#e53935", mb=6))
+        parts.append(badge(bot_items))
+
+        if a_avg is not None and b_avg is not None:
+            diff = b_avg - a_avg
+            a_s  = f"{a_avg:+.2f}%"
+            b_s  = f"{b_avg:+.2f}%"
+            if diff > 0.5:
+                parts += [
+                    p(f"방어 섹터 평균 {pos(b_s)} vs 성장 섹터 평균 {neg(a_s)}."),
+                    p("자금이 기술·성장 섹터에서 방어주와 가치주로 이동하고 있습니다.", col="#555"),
+                    p("이런 로테이션이 지속되면 레버리지 성장주엔 역풍입니다.", col="#e53935"),
+                ]
+            elif diff < -0.5:
+                parts += [
+                    p(f"성장 섹터 평균 {pos(a_s)} vs 방어 섹터 평균 {neg(b_s)}."),
+                    p("자금이 여전히 기술·AI 섹터에 집중되고 있습니다. "
+                      "현 포트폴리오 방향과 시장 흐름이 일치하는 구간입니다.", col="#555"),
+                ]
+            else:
+                parts.append(p(
+                    f"성장 섹터 {sc(a_avg)} / 방어 섹터 {sc(b_avg)}, "
+                    "뚜렷한 로테이션 방향 없이 혼재된 장세입니다.", col="#555"))
+
+        parts.append(hr())
+
+    # ══════════════════════════════════════════════════
+    # ⑥ 선물 방향 — 오늘 장 예고
+    # ══════════════════════════════════════════════════
+    nq_fut_chg = nq_fut.get("chg")
+    sp_fut_chg = sp_fut.get("chg") if isinstance(sp_fut, dict) else None
+
+    if nq_fut_chg is not None:
+        parts.append(p(f"{em('오늘 장 분위기를 예고하는 선물 방향입니다.')}"))
+        fut_items = []
+        nq_s = f"{nq_fut_chg:+.2f}%"
+        fut_items.append(
+            f"{em('나스닥 선물')} {neg(nq_s) if nq_fut_chg < 0 else pos(nq_s)}")
+        if sp_fut_chg is not None:
+            sp_fs = f"{sp_fut_chg:+.2f}%"
+            fut_items.append(
+                f"{em('S&P500 선물')} {neg(sp_fs) if sp_fut_chg < 0 else pos(sp_fs)}")
+        parts.append(badge(fut_items))
+
+        if nq_fut_chg < -0.5 and nas_chg is not None and nas_chg < -1.0:
+            parts.append(p(
+                "전일 급락에 이어 선물까지 추가 하락 중입니다. "
+                "오늘 장 초반 변동성이 클 수 있습니다. "
+                "레버리지 종목은 특히 주의하세요.", col="#e53935"))
+        elif nq_fut_chg > 0.5 and nas_chg is not None and nas_chg < -1.0:
+            parts.append(p(
+                "전일 하락 후 선물이 반등하고 있습니다. "
+                "기술적 반등 시도 가능성이 있으나, "
+                "장 초반 반등이 지속되는지 확인 후 대응하는 게 안전합니다.", col="#555"))
+        elif nq_fut_chg > 0.3:
+            parts.append(p(
+                "선물 상승 중입니다. 오늘 장 초반 긍정적 흐름이 기대됩니다.", col="#555"))
+        else:
+            parts.append(p(
+                "선물이 약보합권입니다. 오늘 장 초반 큰 방향성 없이 출발 예상입니다.",
+                col="#555"))
+
+        parts.append(hr())
+
+    # ══════════════════════════════════════════════════
+    # ⑦ 오늘의 액션 — 구체적 행동 지침
+    # ══════════════════════════════════════════════════
+    parts.append(p(f"그렇다면 {em('지금 어떻게 해야 할까요.')}"))
+
     actions = []
+    nq_fut_chg_v = nq_fut.get("chg")
 
-    # 시장 상승 + 레버리지 비중 높을 때 → 차익실현
-    if port_chg is not None and port_chg >= 2.0 and lev_ratio >= 20:
-        actions.append("TQQQ·SOXL 중 수익률이 높은 종목 일부(10~20%) 차익실현을 고려하세요.")
-
-    # 시장 하락 + 선물 추가 하락 → 방어
-    if nas_chg is not None and nq_chg is not None:
-        if nas_chg < -1.0 and nq_chg < 0:
+    if nas_chg is not None and nq_fut_chg_v is not None:
+        if nas_chg < -1.5 and nq_fut_chg_v < 0:
+            lev_s = f"{lev_ratio:.0f}%"
             actions.append(
-                "전일 하락 + 선물 추가 하락 중입니다. "
-                "오늘 추가 매수보다 현금 비중 유지·관망을 권고합니다.")
+                f"전일 급락에 선물까지 추가 하락 중입니다. "
+                f"레버리지 비중 {lev_s} — 오늘은 추가 매수 금지. "
+                "관망하며 반등 신호를 기다리세요.")
 
-    # 금리 급등 → 성장주 리스크
-    if tnx_chg is not None and tnx_chg > 0.08:
+    if nas_chg is not None and nq_fut_chg_v is not None:
+        if nas_chg < -2.0 and nq_fut_chg_v > 0.3:
+            actions.append(
+                "전일 급락 후 선물이 반등 중입니다. "
+                "분할 매수라면 계획량의 30% 이하로만 진입하고, "
+                "반등 지속 여부를 장 중반까지 확인하세요.")
+
+    if tnx_last is not None and tnx_last >= 4.5:
+        tnx_s = f"{tnx_last:.2f}%"
+        if tnx_chg is not None and tnx_chg > 0.04:
+            actions.append(
+                f"금리 {tnx_s}에 추가 상승까지 — 이 수준에서 레버리지 성장주 "
+                "신규 매수는 리스크 대비 기대수익이 낮습니다. "
+                "현금 비중을 일부 확보해두세요.")
+        else:
+            actions.append(
+                f"금리 {tnx_s} 고공 유지 중입니다. "
+                "성장주 추가 매수 시 손절 기준을 반드시 설정하고 진입하세요.")
+
+    if sox_chg is not None and sox_chg < -3.0:
+        sox_s = f"{sox_chg:+.2f}%"
         actions.append(
-            f"금리가 {tnx_chg:+.3f}%p 급등했습니다. "
-            "금리 민감도가 높은 성장주 추가 매수를 자제하고, "
-            "기존 레버리지 포지션의 손절선을 재확인하세요.")
+            f"SOX가 {sox_s} 폭락했습니다. "
+            "SOXL은 SOX의 3배 추종 — 오늘도 추가 하락 가능성이 있습니다. "
+            "손절선 아래로 내려온다면 기계적으로 비중 축소를 실행하세요.")
 
-    # 환율 원화 약세 → 달러 자산 유리
+    if lev_ratio >= 20 and port_chg is not None and port_chg >= 2.0:
+        actions.append(
+            "레버리지 종목에서 수익이 쌓인 상태입니다. "
+            "TQQQ·SOXL 중 수익률이 높은 종목 10~20%를 "
+            "오늘 장 초반 반등 시 부분 차익실현하는 방안을 검토하세요.")
+
+    if a_avg is not None and b_avg is not None and (b_avg - a_avg) > 0.8:
+        actions.append(
+            "방어주 로테이션이 뚜렷합니다. "
+            "기술주 비중을 줄인 현금으로 VDC(생필품)·XLV(헬스케어) 등 "
+            "방어 ETF를 소액 분할 편입하는 방법도 있습니다.")
+
     if fx_chg is not None and fx_chg > 0.5:
+        fx_s = f"{fx_last:,.0f}원" if fx_last else "?"
         actions.append(
-            "원화 약세 구간입니다. 달러 자산(미국 ETF·주식) 비중 유지가 유리하며, "
-            "국내 주식 비중 확대 시점은 환율 안정 이후로 늦추세요.")
+            f"원화 약세 ({fx_s}) 구간입니다. "
+            "달러 자산(미국 ETF·주식) 비중을 섣불리 줄이지 말고, "
+            "환율 안정 이후 조정 여부를 판단하세요.")
 
-    # 섹터 강세 → 관련 종목 집중
-    if top_sec:
-        rel_holds = [h["name"] for h in holdings
-                     if any(kw in h["name"] for kw in
-                            top_sec["name"].split("·"))]
-        if rel_holds:
-            actions.append(
-                f"오늘 가장 강한 섹터는 {top_sec['name']}({top_sec['chg']:+.2f}%)입니다. "
-                f"관련 보유 종목({', '.join(rel_holds)})의 모멘텀을 활용하되 "
-                "단기 급등 후 차익실현 매물에 주의하세요.")
-
-    # 액션 없을 경우 기본 메시지
     if not actions:
         actions.append(
             "현재 시장 지표상 긴급한 포지션 변경 사유는 없습니다. "
-            "기존 포지션을 유지하되 장중 선물 방향과 섹터 흐름을 모니터링하세요.")
+            "기존 포지션을 유지하되 선물 방향과 섹터 흐름을 모니터링하세요.")
 
-    # ── 섹션 4: 리스크 경고 ───────────────────────────────────────────────
-    risks = []
+    parts.append(badge(actions))
+    parts.append(hr())
 
+    # ══════════════════════════════════════════════════
+    # ⑧ 이번 주 / 다음 주 체크포인트
+    # ══════════════════════════════════════════════════
+    parts.append(p(f"{em('앞으로 챙겨볼 것들입니다.')}"))
+    checkpoint_items = []
+
+    if tnx_last is not None and tnx_last >= 4.3:
+        checkpoint_items.append(
+            "CPI·PPI 발표 — 금리 방향의 핵심 변수. "
+            "예상보다 낮게 나오면 기술주 반등 신호.")
+    if sox_chg is not None and sox_chg < -2.0:
+        checkpoint_items.append(
+            "반도체 주요 기업 가이던스·실적 — SOX 급락의 추세 전환 여부 확인.")
+    if nas_chg is not None and nas_chg < -2.0:
+        checkpoint_items.append(
+            "FOMC 의사록·연준 위원 발언 — 금리 인상 또는 동결 시그널 변화 체크.")
+    checkpoint_items.append(
+        "나스닥 선물 방향 — 매일 장 시작 전 확인. "
+        "선물 -1% 이하면 레버리지 추가 매수 보류.")
     if lev_ratio >= 15:
-        risks.append(
-            f"레버리지 ETF {lev_ratio:.1f}% 보유 중 — 지수 -3% 시 최대 -9% 손실 가능.")
-    if tnx_last is not None and tnx_last >= 4.5:
-        risks.append(
-            f"10년물 금리 {tnx_last:.3f}% — 고금리 장기화 시 성장주 멀티플 압축 리스크.")
-    if nas_chg is not None and nas_chg < -1.5:
-        risks.append("나스닥 급락 다음 날 — 추가 하락 vs 기술적 반등 양방향 모두 대비.")
-    if not risks:
-        risks.append("현재 특이 리스크 없음 — 정기 비중 점검 유지.")
+        lev_s = f"{lev_ratio:.0f}%"
+        checkpoint_items.append(
+            f"레버리지 비중 {lev_s} 점검 — 목표 비중 범위(15~20%) 이탈 시 리밸런싱.")
 
-    # ── 칼럼 HTML 조립 ────────────────────────────────────────────────────
-    def col_section(title, items, accent="#111"):
-        body = "".join(
-            f"<p style='margin:0 0 10px;font-size:14px;color:#222;line-height:1.8;'>{t}</p>"
-            for t in items
-        )
-        return f"""
-        <tr><td style='padding:18px 24px 4px;'>
-          <p style='margin:0 0 10px;font-size:10px;font-weight:600;
-                    letter-spacing:.1em;text-transform:uppercase;color:{accent};'>{title}</p>
-          {body}
-        </td></tr>"""
+    parts.append(badge(checkpoint_items))
+    parts.append(hr())
 
-    html = f"""
+    # ══════════════════════════════════════════════════
+    # ⑨ 리스크 고지
+    # ══════════════════════════════════════════════════
+    if lev_ratio >= 15:
+        lev_s  = f"{lev_ratio:.0f}%"
+        loss_s = f"{lev_ratio * 0.3:.0f}%"
+        parts.append(
+            p(f"※ 레버리지 {lev_s} 보유 중 — 시장 -3% 시 최대 {loss_s} 손실 가능. "
+              "본 칼럼은 수집 데이터 기반 자동 생성이며 투자 권유가 아닙니다.",
+              size=12, col="#aaa", mb=0))
+    else:
+        parts.append(
+            p("※ 본 칼럼은 수집 데이터 기반 자동 생성이며 투자 권유가 아닙니다.",
+              size=12, col="#aaa", mb=0))
+
+    body = "\n".join(parts)
+    return f"""
     <table width='100%' cellpadding='0' cellspacing='0'
            style='background:#ffffff;margin-bottom:2px;'>
-      <tr><td style='padding:20px 24px 4px;border-top:3px solid #111;'>
-        <p style='margin:0;font-size:10px;color:#999;letter-spacing:.1em;
-                  text-transform:uppercase;'>오늘의 투자 칼럼</p>
-        <p style='margin:4px 0 0;font-size:18px;font-weight:500;color:#111;'>
-          지금 내 포트폴리오, 어떻게 해야 하나</p>
-      </td></tr>
-      {col_section("① 시장 진단",    diag,    "#333")}
-      {col_section("② 포트폴리오 점검", pfcheck, "#333")}
-      {col_section("③ 오늘의 액션",  actions, "#c62828")}
-      {col_section("④ 리스크 경고",  risks,   "#1565c0")}
-      <tr><td style='padding:8px 24px 18px;'>
-        <p style='margin:0;font-size:11px;color:#bbb;'>
-          ※ 본 칼럼은 수집 데이터 기반 자동 생성이며 투자 권유가 아닙니다.
-          최종 판단은 투자자 본인에게 있습니다.</p>
+      <tr><td style='padding:24px 28px 8px;border-top:3px solid #111;'>
+        <p style='margin:0 0 4px;font-size:10px;color:#999;
+                  letter-spacing:.12em;text-transform:uppercase;'>오늘의 투자 칼럼</p>
+        <p style='margin:0 0 22px;font-size:20px;font-weight:600;color:#111;
+                  line-height:1.4;'>지금 내 포트폴리오,<br>어떻게 해야 하나</p>
+        {body}
       </td></tr>
     </table>"""
-    return html
 
 
 def build_briefing(data: dict) -> str:
@@ -821,6 +1086,10 @@ def build_briefing(data: dict) -> str:
         <td width="33%" style="padding:16px 18px;vertical-align:top;border-top:1px solid #eeeeee;">
           <p style="margin:0 0 8px;font-size:11px;font-weight:500;color:#222;">발송</p>
           <p style="margin:0;font-size:12px;color:#888;line-height:1.9;">매일 오전 06:30<br>Gmail · 텔레그램<br>투자 권유 아님</p>
+          <p style="margin:8px 0 0;font-size:11px;">
+            <a href="https://github.com/seungweon77-sketch/CLAUDE-H"
+               style="color:#555;text-decoration:none;">
+              ⌥ GitHub 코드 보기 ↗</a></p>
         </td>
       </tr>
     </table>"""
@@ -964,12 +1233,8 @@ def main():
         with open("latest_briefing.html", "w", encoding="utf-8") as f: f.write(html)
         with open("latest_briefing.txt",  "w", encoding="utf-8") as f: f.write(text)
         sent = any([send_email(html), send_telegram(text), send_discord(text), send_slack(text)])
-        print("브리핑 발송 완료." if sent else "발송 채널 없음 → latest_briefing.html 만 생성됨.")
+        print("브리핑 발송 완료." if sent else "발송 채널 없음 -> latest_briefing.html 만 생성됨.")
         log.info("Market Mentor 실행 종료(정상)")
     except Exception as e:
         log.critical(f"치명적 오류: {e}", exc_info=True)
         import sys; sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()
