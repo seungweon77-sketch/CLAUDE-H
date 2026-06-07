@@ -1,0 +1,43 @@
+name: Market Mentor Daily Briefing
+
+# ───────────────────────────────────────────────
+# 실행 트리거
+# ───────────────────────────────────────────────
+on:
+  schedule:
+    # cron은 UTC 기준. 한국 06:30 = UTC 21:30 (전날)
+    # 평일(월~금)만 실행하려면 마지막 자리 1-5
+    - cron: '30 21 * * 0-4'   # UTC 일~목 21:30 = KST 월~금 06:30
+  workflow_dispatch:           # 수동 실행 버튼도 활성화(테스트용)
+
+jobs:
+  send-briefing:
+    runs-on: ubuntu-latest     # GitHub 무료 가상머신
+    timeout-minutes: 10        # 무한루프 방지(과금 보호)
+
+    steps:
+      # 1) 저장소 코드 체크아웃
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 2) Python 환경 구성
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # 3) 의존성 설치
+      - name: Install dependencies
+        run: pip install yfinance feedparser requests
+
+      # 4) 브리핑 실행 (Secrets를 환경변수로 주입)
+      - name: Run Market Mentor
+        env:
+          TG_TOKEN:   ${{ secrets.TG_TOKEN }}
+          TG_CHAT:    ${{ secrets.TG_CHAT }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PW: ${{ secrets.GMAIL_APP_PW }}
+          MAIL_TO:    ${{ secrets.MAIL_TO }}
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          SLACK_WEBHOOK:   ${{ secrets.SLACK_WEBHOOK }}
+        run: python market_mentor.py
