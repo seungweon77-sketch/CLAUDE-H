@@ -230,6 +230,265 @@ def collect_all() -> dict:
 # 3. 브리핑 빌드 (균형 애널리스트 어조)
 # ──────────────────────────────────────────────────────────────────
 
+def build_column(data: dict) -> str:
+    """
+    수집 데이터를 근거로 투자자 행동 칼럼을 자동 생성.
+    시장 진단 → 포트폴리오 점검 → 오늘의 액션 → 리스크 경고 4개 섹션.
+    모든 문장은 실제 수치에 근거하며 근거 없는 문장은 출력하지 않음.
+    """
+    # ── 핵심 지표 추출 ─────────────────────────────────────────────────────
+    nasdaq  = data.get("macro",  {}).get("나스닥",            {})
+    sp500   = data.get("macro",  {}).get("S&P 500",           {})
+    sox     = data.get("macro",  {}).get("필라델피아 반도체",   {})
+    tnx     = data.get("macro2", {}).get("美 10년물 금리",     {})
+    fx      = data.get("macro2", {}).get("원/달러 환율",       {})
+    wti     = data.get("macro2", {}).get("WTI 유가",           {})
+    nq_fut  = data.get("futures",{}).get("나스닥 선물",        {})
+    sp_fut  = data.get("futures",{}).get("S&P500 선물",        {})
+
+    nas_chg  = nasdaq.get("chg")
+    sox_chg  = sox.get("chg")
+    tnx_chg  = tnx.get("chg")
+    tnx_last = tnx.get("last")
+    fx_chg   = fx.get("chg")
+    fx_last  = fx.get("last")
+    nq_chg   = nq_fut.get("chg")
+
+    holdings = data.get("holdings", [])
+    secs     = data.get("sectors",  [])
+
+    # 포트폴리오 가중평균 등락
+    weighted, w_sum = 0.0, 0
+    for h in holdings:
+        if h.get("ok") and h.get("chg") is not None:
+            weighted += h["chg"] * h["buy"]
+            w_sum    += h["buy"]
+    port_chg   = (weighted / w_sum) if w_sum else None
+    total_buy  = sum(h["buy"] for h in holdings)
+
+    # 레버리지 비중
+    lev_buy   = sum(h["buy"] for h in holdings
+                    if any(k in h["name"] for k in ["3배", "2배"]))
+    lev_ratio = (lev_buy / total_buy * 100) if total_buy else 0
+
+    # 개별 종목 등락 dict
+    hold_map = {h["name"]: h for h in holdings}
+
+    # 섹터 트랙별 평균 등락
+    a_chgs = [s["chg"] for s in secs if s["track"]=="A" and s.get("ok") and s["chg"] is not None]
+    b_chgs = [s["chg"] for s in secs if s["track"]=="B" and s.get("ok") and s["chg"] is not None]
+    a_avg  = sum(a_chgs)/len(a_chgs) if a_chgs else None
+    b_avg  = sum(b_chgs)/len(b_chgs) if b_chgs else None
+
+    # 상위·하위 섹터
+    valid_secs = sorted([s for s in secs if s.get("ok") and s["chg"] is not None],
+                        key=lambda x: x["chg"], reverse=True)
+    top_sec = valid_secs[0]  if valid_secs else None
+    bot_sec = valid_secs[-1] if valid_secs else None
+
+    # ── 섹션 1: 시장 진단 ─────────────────────────────────────────────────
+    diag = []
+
+    # 나스닥 방향
+    if nas_chg is not None:
+        if nas_chg >= 1.5:
+            diag.append(f"전일 나스닥은 {nas_chg:+.2f}%로 강하게 상승 마감했습니다. "
+                        "빅테크 중심의 매수세가 지속되고 있으며, 단기 모멘텀은 긍정적입니다.")
+        elif nas_chg >= 0.3:
+            diag.append(f"전일 나스닥은 {nas_chg:+.2f}% 소폭 상승했습니다. "
+                        "방향성은 유지되고 있으나 추세 강도는 크지 않습니다.")
+        elif nas_chg >= -0.3:
+            diag.append(f"전일 나스닥은 {nas_chg:+.2f}%로 보합 마감했습니다. "
+                        "뚜렷한 방향성 없이 관망세가 이어지는 구간입니다.")
+        elif nas_chg >= -1.5:
+            diag.append(f"전일 나스닥이 {nas_chg:+.2f}%로 하락했습니다. "
+                        "단기 매도 압력이 감지되며, 추가 하락 여부를 확인해야 합니다.")
+        else:
+            diag.append(f"전일 나스닥이 {nas_chg:+.2f}%로 급락했습니다. "
+                        "패닉셀 가능성을 배제할 수 없으며 레버리지 포지션 점검이 긴급합니다.")
+
+    # 금리 방향 코멘트
+    if tnx_chg is not None and tnx_last is not None:
+        if tnx_chg > 0.05:
+            diag.append(f"미국 10년물 금리가 {tnx_last:.3f}%({tnx_chg:+.3f}%p)로 상승했습니다. "
+                        "금리 상승은 성장주·레버리지 ETF 밸류에이션에 직접적인 역풍입니다.")
+        elif tnx_chg < -0.05:
+            diag.append(f"미국 10년물 금리가 {tnx_last:.3f}%({tnx_chg:+.3f}%p)로 하락했습니다. "
+                        "금리 하락은 성장주 중심 현 포트폴리오에 우호적인 환경입니다.")
+
+    # 환율 코멘트
+    if fx_chg is not None and fx_last is not None:
+        if fx_chg > 0.5:
+            diag.append(f"원/달러 환율이 {fx_last:,.0f}원({fx_chg:+.2f}%)으로 원화 약세입니다. "
+                        "달러 자산 보유 비중이 높아 환산 수익이 추가로 발생합니다.")
+        elif fx_chg < -0.5:
+            diag.append(f"원/달러 환율이 {fx_last:,.0f}원({fx_chg:+.2f}%)으로 원화 강세입니다. "
+                        "달러 자산의 원화 환산 수익률이 일부 희석됩니다.")
+
+    # 선물 방향
+    if nq_chg is not None:
+        if nq_chg >= 0.3:
+            diag.append(f"나스닥 선물은 현재 {nq_chg:+.2f}%로 강보합권입니다. "
+                        "오늘 장 초반 긍정적 흐름이 예상됩니다.")
+        elif nq_chg <= -0.3:
+            diag.append(f"나스닥 선물은 {nq_chg:+.2f}%로 하락 중입니다. "
+                        "오늘 장 초반 변동성 확대에 대비하세요.")
+
+    # ── 섹션 2: 포트폴리오 점검 ──────────────────────────────────────────
+    pfcheck = []
+
+    # 포트폴리오 전체 등락
+    if port_chg is not None:
+        if port_chg >= 2.0:
+            pfcheck.append(
+                f"내 포트폴리오는 전일 {port_chg:+.2f}% 상승했습니다. "
+                "단기 수익이 누적된 구간에서는 레버리지 ETF의 일부 차익실현이 "
+                "리스크 관리 관점에서 유효합니다.")
+        elif port_chg >= 0:
+            pfcheck.append(
+                f"내 포트폴리오는 {port_chg:+.2f}% 소폭 상승했습니다. "
+                "현재 포지션을 유지하되 선물 방향을 재확인하세요.")
+        elif port_chg >= -2.0:
+            pfcheck.append(
+                f"내 포트폴리오는 {port_chg:+.2f}% 하락했습니다. "
+                "손실 원인이 시장 전반인지 개별 종목인지 섹터 흐름과 대조해 확인하세요.")
+        else:
+            pfcheck.append(
+                f"내 포트폴리오가 {port_chg:+.2f}%로 큰 폭 하락했습니다. "
+                "레버리지 ETF 비중을 즉시 점검하고, 추가 손실 시 손절 기준을 재설정하세요.")
+
+    # 레버리지 비중 경고
+    if lev_ratio >= 25:
+        pfcheck.append(
+            f"레버리지 ETF(SOXL·TQQQ·TSLL) 합산 비중이 {lev_ratio:.1f}%로 높습니다. "
+            "지수가 3% 하락하면 레버리지 포지션은 최대 9% 손실이 발생합니다. "
+            "변동성 장세에서는 비중을 15~20% 이내로 유지하는 것이 원칙입니다.")
+    elif lev_ratio >= 15:
+        pfcheck.append(
+            f"레버리지 ETF 비중은 {lev_ratio:.1f}%입니다. "
+            "나스닥 선물이 하락 중이라면 오늘 장중 비중 조정을 고려하세요.")
+
+    # SOX와 국내 반도체 연관성
+    if sox_chg is not None:
+        hi  = hold_map.get("SK하이닉스",  {})
+        sam = hold_map.get("삼성전자",     {})
+        if sox_chg < -1.0:
+            pfcheck.append(
+                f"필라델피아 반도체 지수가 {sox_chg:+.2f}% 하락했습니다. "
+                "SK하이닉스·삼성전자는 SOX와 강하게 동조하므로 "
+                "오늘 국내장 개장 시 추가 하방 압력이 예상됩니다.")
+        elif sox_chg >= 1.5:
+            pfcheck.append(
+                f"필라델피아 반도체 지수가 {sox_chg:+.2f}% 강세입니다. "
+                "SK하이닉스·삼성전자의 오늘 상승 개장 가능성이 높습니다.")
+
+    # 섹터 로테이션 신호
+    if a_avg is not None and b_avg is not None:
+        if b_avg > a_avg + 0.5:
+            pfcheck.append(
+                f"방어 섹터(헬스케어·금융 등) 평균이 {b_avg:+.2f}%로 "
+                f"성장 섹터({a_avg:+.2f}%)를 {b_avg-a_avg:.2f}%p 앞서고 있습니다. "
+                "자금이 성장주에서 방어주로 이동하는 로테이션 신호입니다. "
+                "이런 구간에서는 레버리지 성장주 비중 축소가 유리합니다.")
+        elif a_avg > b_avg + 0.5:
+            pfcheck.append(
+                f"성장·기술 섹터 평균이 {a_avg:+.2f}%로 방어 섹터({b_avg:+.2f}%)를 "
+                f"{a_avg-b_avg:.2f}%p 앞서고 있습니다. "
+                "현 포트폴리오 방향과 시장 흐름이 일치합니다.")
+
+    # ── 섹션 3: 오늘의 액션 ───────────────────────────────────────────────
+    actions = []
+
+    # 시장 상승 + 레버리지 비중 높을 때 → 차익실현
+    if port_chg is not None and port_chg >= 2.0 and lev_ratio >= 20:
+        actions.append("TQQQ·SOXL 중 수익률이 높은 종목 일부(10~20%) 차익실현을 고려하세요.")
+
+    # 시장 하락 + 선물 추가 하락 → 방어
+    if nas_chg is not None and nq_chg is not None:
+        if nas_chg < -1.0 and nq_chg < 0:
+            actions.append(
+                "전일 하락 + 선물 추가 하락 중입니다. "
+                "오늘 추가 매수보다 현금 비중 유지·관망을 권고합니다.")
+
+    # 금리 급등 → 성장주 리스크
+    if tnx_chg is not None and tnx_chg > 0.08:
+        actions.append(
+            f"금리가 {tnx_chg:+.3f}%p 급등했습니다. "
+            "금리 민감도가 높은 성장주 추가 매수를 자제하고, "
+            "기존 레버리지 포지션의 손절선을 재확인하세요.")
+
+    # 환율 원화 약세 → 달러 자산 유리
+    if fx_chg is not None and fx_chg > 0.5:
+        actions.append(
+            "원화 약세 구간입니다. 달러 자산(미국 ETF·주식) 비중 유지가 유리하며, "
+            "국내 주식 비중 확대 시점은 환율 안정 이후로 늦추세요.")
+
+    # 섹터 강세 → 관련 종목 집중
+    if top_sec:
+        rel_holds = [h["name"] for h in holdings
+                     if any(kw in h["name"] for kw in
+                            top_sec["name"].split("·"))]
+        if rel_holds:
+            actions.append(
+                f"오늘 가장 강한 섹터는 {top_sec['name']}({top_sec['chg']:+.2f}%)입니다. "
+                f"관련 보유 종목({', '.join(rel_holds)})의 모멘텀을 활용하되 "
+                "단기 급등 후 차익실현 매물에 주의하세요.")
+
+    # 액션 없을 경우 기본 메시지
+    if not actions:
+        actions.append(
+            "현재 시장 지표상 긴급한 포지션 변경 사유는 없습니다. "
+            "기존 포지션을 유지하되 장중 선물 방향과 섹터 흐름을 모니터링하세요.")
+
+    # ── 섹션 4: 리스크 경고 ───────────────────────────────────────────────
+    risks = []
+
+    if lev_ratio >= 15:
+        risks.append(
+            f"레버리지 ETF {lev_ratio:.1f}% 보유 중 — 지수 -3% 시 최대 -9% 손실 가능.")
+    if tnx_last is not None and tnx_last >= 4.5:
+        risks.append(
+            f"10년물 금리 {tnx_last:.3f}% — 고금리 장기화 시 성장주 멀티플 압축 리스크.")
+    if nas_chg is not None and nas_chg < -1.5:
+        risks.append("나스닥 급락 다음 날 — 추가 하락 vs 기술적 반등 양방향 모두 대비.")
+    if not risks:
+        risks.append("현재 특이 리스크 없음 — 정기 비중 점검 유지.")
+
+    # ── 칼럼 HTML 조립 ────────────────────────────────────────────────────
+    def col_section(title, items, accent="#111"):
+        body = "".join(
+            f"<p style='margin:0 0 10px;font-size:14px;color:#222;line-height:1.8;'>{t}</p>"
+            for t in items
+        )
+        return f"""
+        <tr><td style='padding:18px 24px 4px;'>
+          <p style='margin:0 0 10px;font-size:10px;font-weight:600;
+                    letter-spacing:.1em;text-transform:uppercase;color:{accent};'>{title}</p>
+          {body}
+        </td></tr>"""
+
+    html = f"""
+    <table width='100%' cellpadding='0' cellspacing='0'
+           style='background:#ffffff;margin-bottom:2px;'>
+      <tr><td style='padding:20px 24px 4px;border-top:3px solid #111;'>
+        <p style='margin:0;font-size:10px;color:#999;letter-spacing:.1em;
+                  text-transform:uppercase;'>오늘의 투자 칼럼</p>
+        <p style='margin:4px 0 0;font-size:18px;font-weight:500;color:#111;'>
+          지금 내 포트폴리오, 어떻게 해야 하나</p>
+      </td></tr>
+      {col_section("① 시장 진단",    diag,    "#333")}
+      {col_section("② 포트폴리오 점검", pfcheck, "#333")}
+      {col_section("③ 오늘의 액션",  actions, "#c62828")}
+      {col_section("④ 리스크 경고",  risks,   "#1565c0")}
+      <tr><td style='padding:8px 24px 18px;'>
+        <p style='margin:0;font-size:11px;color:#bbb;'>
+          ※ 본 칼럼은 수집 데이터 기반 자동 생성이며 투자 권유가 아닙니다.
+          최종 판단은 투자자 본인에게 있습니다.</p>
+      </td></tr>
+    </table>"""
+    return html
+
+
 def build_briefing(data: dict) -> str:
     """수집 데이터를 HTML 이메일 본문으로 가공. (와이어프레임 리디자인 버전)"""
     today = dt.datetime.now().strftime("%Y년 %m월 %d일 (%a)")
@@ -515,13 +774,14 @@ def build_briefing(data: dict) -> str:
     valid = [s for s in secs_sorted if s["ok"]]
     if len(valid) >= 2:
         top_s, bot_s = valid[0], valid[-1]
-        rotation = (f"<b>{top_s['name']}</b>({fmt_chg(top_s['chg'])}) 최강 &nbsp;/&nbsp; "
-                    f"<b>{bot_s['name']}</b>({fmt_chg(bot_s['chg'])}) 최약. ")
+        top_nm = top_s['name']; top_chg_s = fmt_chg(top_s['chg'])
+        bot_nm = bot_s['name']; bot_chg_s = fmt_chg(bot_s['chg'])
+        rotation = (f"<b>{top_nm}</b>({top_chg_s}) 최강 &nbsp;/&nbsp; "
+                    f"<b>{bot_nm}</b>({bot_chg_s}) 최약. ")
         b_top = [s for s in valid[:3] if s["track"] == "B"]
         if b_top:
             names = ", ".join(s["name"] for s in b_top)
-            rotation += (f"방어/가치 섹터({names})로 자금 유입 감지 → "
-                         "레버리지 비중 점검 권고.")
+            rotation += f"방어/가치 섹터({names})로 자금 유입 감지 → 레버리지 비중 점검 권고."
         else:
             rotation += "기술·성장 섹터 주도 흐름 — 현 포트폴리오 방향 부합."
     else:
@@ -544,52 +804,27 @@ def build_briefing(data: dict) -> str:
       </tr>
     </table>"""
 
-    # ── BLOCK G: 다크 멘토 코멘트 ─────────────────────────────────────────
-    comment = (
-        f"현재 레버리지 ETF 비중 <b style='color:#ff6b6b;'>{lev_ratio:.1f}%</b>. "
-        "변동성 확대 구간에서는 손익 진폭이 원지수 대비 2~3배로 증폭됩니다. "
-        "전일 종가 + 금일 선물 방향을 함께 확인한 뒤 비중을 점검하시기 바랍니다. "
-        "국내 반도체(SK하이닉스·삼성전자)는 필라델피아 반도체 지수와 동조하므로 "
-        "상단 SOX 등락률을 선행지표로 활용하세요."
-    )
-    mentor_block = f"""
-    <table width="100%" cellpadding="0" cellspacing="0"
-           style="background:#111111;margin-bottom:2px;">
-      <tr><td style="padding:20px 24px;">
-        <p style="margin:0 0 8px;font-size:10px;color:#555;
-                  letter-spacing:.1em;text-transform:uppercase;">멘토 코멘트</p>
-        <p style="margin:0;font-size:14px;color:#cccccc;line-height:1.75;">
-          {comment}</p>
-      </td></tr>
-    </table>"""
+    mentor_block = build_column(data)
 
-    # ── BLOCK H: 3단 푸터 ─────────────────────────────────────────────────
     footer = """
     <table width="100%" cellpadding="0" cellspacing="0"
            style="background:#ffffff;border-radius:0 0 8px 8px;">
       <tr>
-        <td width="33%" style="padding:16px 18px;vertical-align:top;
-                               border-top:1px solid #eeeeee;">
+        <td width="33%" style="padding:16px 18px;vertical-align:top;border-top:1px solid #eeeeee;">
           <p style="margin:0 0 8px;font-size:11px;font-weight:500;color:#222;">포트폴리오</p>
-          <p style="margin:0;font-size:12px;color:#888;line-height:1.9;">
-            ISA (6386)<br>위탁 (6362)<br>위탁 (6466)</p>
+          <p style="margin:0;font-size:12px;color:#888;line-height:1.9;">ISA (6386)<br>위탁 (6362)<br>위탁 (6466)</p>
         </td>
-        <td width="33%" style="padding:16px 18px;vertical-align:top;
-                               border-top:1px solid #eeeeee;">
+        <td width="33%" style="padding:16px 18px;vertical-align:top;border-top:1px solid #eeeeee;">
           <p style="margin:0 0 8px;font-size:11px;font-weight:500;color:#222;">데이터 소스</p>
-          <p style="margin:0;font-size:12px;color:#888;line-height:1.9;">
-            yfinance<br>Google News RSS<br>실시간 선물</p>
+          <p style="margin:0;font-size:12px;color:#888;line-height:1.9;">yfinance<br>Google News RSS<br>실시간 선물</p>
         </td>
-        <td width="33%" style="padding:16px 18px;vertical-align:top;
-                               border-top:1px solid #eeeeee;">
+        <td width="33%" style="padding:16px 18px;vertical-align:top;border-top:1px solid #eeeeee;">
           <p style="margin:0 0 8px;font-size:11px;font-weight:500;color:#222;">발송</p>
-          <p style="margin:0;font-size:12px;color:#888;line-height:1.9;">
-            매일 오전 06:30<br>Gmail · 텔레그램<br>투자 권유 아님</p>
+          <p style="margin:0;font-size:12px;color:#888;line-height:1.9;">매일 오전 06:30<br>Gmail · 텔레그램<br>투자 권유 아님</p>
         </td>
       </tr>
     </table>"""
 
-    # ── 전체 조립 (외부 wrapper : 620px 고정, 배경 #f2f2f2) ──────────────
     html = f"""
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <style>
@@ -617,211 +852,123 @@ def build_briefing(data: dict) -> str:
 
 
 def build_text(data: dict) -> str:
-    """
-    메신저(텔레그램/Discord/Slack)용 모바일 친화 평문 브리핑.
-    HTML 태그 제거 방식 대신 수집 데이터에서 직접 재구성 →
-    종목당 한 줄, 정렬·구분선으로 좁은 화면에서도 구조가 유지됨.
-    """
+    """메신저용 모바일 친화 평문 브리핑."""
     import datetime as _dt
     today = _dt.datetime.now().strftime("%Y-%m-%d (%a)")
-
     def chg_str(v, ok):
-        """등락률을 부호+화살표로. 모바일에서 색 대신 기호로 방향 표시."""
-        if not ok or v is None:
-            return "  N/A"
-        arrow = "🔺" if v >= 0 else "🔻"
-        return f"{arrow}{v:+.2f}%"
-
-    L = []                                  # 줄 단위 누적(라인 리스트)
-    L.append(f"☕ Market Mentor  {today}")
-
-    # ── 한 줄 요약 (맨 위, 알림 프리뷰 대응) ──
+        if not ok or v is None: return "  N/A"
+        return f"{'🔺' if v >= 0 else '🔻'}{v:+.2f}%"
+    L = [f"☕ Market Mentor  {today}"]
     weighted, w_sum = 0.0, 0
     for h in data["holdings"]:
         if h["ok"] and h["chg"] is not None:
-            weighted += h["chg"] * h["buy"]
-            w_sum += h["buy"]
+            weighted += h["chg"] * h["buy"]; w_sum += h["buy"]
     port_chg = (weighted / w_sum) if w_sum else None
     nas = data.get("macro", {}).get("나스닥", {})
-    fx = data.get("macro2", {}).get("원/달러 환율", {})
-    p = f"{'🔺' if (port_chg or 0) >= 0 else '🔻'}{port_chg:+.2f}%" if port_chg is not None else "N/A"
-    n = f"{nas['chg']:+.2f}%" if nas.get("ok") else "N/A"
+    fx  = data.get("macro2", {}).get("원/달러 환율", {})
+    p  = f"{'🔺' if (port_chg or 0) >= 0 else '🔻'}{port_chg:+.2f}%" if port_chg is not None else "N/A"
+    n  = f"{nas['chg']:+.2f}%" if nas.get("ok") else "N/A"
     f_ = f"{fx['last']:,.0f}원" if fx.get("ok") and fx.get("last") else "N/A"
     L.append(f"내 자산 {p} | 나스닥 {n} | 환율 {f_}")
     L.append("━━━━━━━━━━━━━━━━")
-
-    # ── 1. 보유종목 등락 (등락순) ──
     L.append("📊 내 보유종목")
-    holds = sorted(data["holdings"],
-                   key=lambda x: (x["chg"] if x["ok"] else -999), reverse=True)
+    holds = sorted(data["holdings"], key=lambda x: (x["chg"] if x["ok"] else -999), reverse=True)
     for h in holds:
-        # 종목명 12자로 고정 정렬 → 등락률 열이 세로로 가지런
         name = (h["name"][:11] + "…") if len(h["name"]) > 12 else h["name"].ljust(12)
         L.append(f"{name} {chg_str(h['chg'], h['ok'])}")
-
-    # ── 2. 핵심 종목 뉴스 ──
     news_lines = []
     for nm, items in data.get("news", {}).items():
         if items:
             news_lines.append(f"• {nm}")
-            for t in items:
-                news_lines.append(f"  - {t[:60]}")   # 헤드라인 60자 컷
+            for t in items: news_lines.append(f"  - {t[:60]}")
     if news_lines:
-        L.append("")
-        L.append("📰 핵심 뉴스")
-        L.extend(news_lines)
-
-    # ── 3. 미국증시 + 매크로 ──
+        L.extend(["", "📰 핵심 뉴스"] + news_lines)
     def macro_block(title, dct, names):
         out = [title]
         for n in names:
             d = dct.get(n, {"chg": None, "ok": False})
             out.append(f"{n.ljust(10)} {chg_str(d.get('chg'), d.get('ok', False))}")
         return out
-    L.append("")
-    L.extend(macro_block("🇺🇸 전일 미국증시",
-                         data.get("macro", {}), [m[0] for m in MACRO]))
-    L.append("")
-    L.extend(macro_block("🌐 매크로",
-                         data.get("macro2", {}), [m[0] for m in MACRO_2]))
-
-    # ── 4. 섹터 (등락순, 트랙 구분) ──
-    secs = sorted(data.get("sectors", []),
-                  key=lambda x: (x["chg"] if x["ok"] else -999), reverse=True)
+    L.extend([""] + macro_block("🇺🇸 전일 미국증시", data.get("macro", {}), [m[0] for m in MACRO]))
+    L.extend([""] + macro_block("🌐 매크로", data.get("macro2", {}), [m[0] for m in MACRO_2]))
+    secs = sorted(data.get("sectors", []), key=lambda x: (x["chg"] if x["ok"] else -999), reverse=True)
     if secs:
-        L.append("")
-        L.append("🏭 섹터 (강세순)")
+        L.extend(["", "🏭 섹터 (강세순)"])
         for s in secs:
-            tag = "◆" if s["track"] == "A" else "◇"   # ◆보유연관 ◇시장전반
-            nm = s["name"][:9].ljust(9)
-            L.append(f"{tag}{nm} {chg_str(s['chg'], s['ok'])}")
-
-    L.append("━━━━━━━━━━━━━━━━")
-    L.append("※ 참고자료이며 투자권유 아님")
+            tag = "◆" if s["track"] == "A" else "◇"
+            L.append(f"{tag}{s['name'][:9].ljust(9)} {chg_str(s['chg'], s['ok'])}")
+    L.extend(["━━━━━━━━━━━━━━━━", "※ 참고자료이며 투자권유 아님"])
     return "\n".join(L)
 
 
-# ──────────────────────────────────────────────────────────────────
-# 4. 발송 함수
-# ──────────────────────────────────────────────────────────────────
-
 def send_email(html: str) -> bool:
-    """Gmail SMTP로 HTML 메일 발송. 설정 미비 시 건너뜀."""
+    import smtplib, datetime as dt
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
     if not (CFG["gmail_user"] and CFG["gmail_pw"] and CFG["mail_to"]):
-        log.info("이메일 설정 미비 → 발송 생략")
-        return False
+        log.info("이메일 설정 미비 → 발송 생략"); return False
     try:
         msg = MIMEMultipart("alternative")
-        today = dt.datetime.now().strftime("%m/%d")
-        msg["Subject"] = f"☕ [{today}] Market Mentor 모닝 브리핑"
-        msg["From"] = CFG["gmail_user"]
-        msg["To"] = CFG["mail_to"]
-        msg.attach(MIMEText(html, "html", "utf-8"))   # HTML 파트 첨부
-        # Gmail SSL 포트 465 사용
+        msg["Subject"] = f"☕ [{dt.datetime.now().strftime('%m/%d')}] Market Mentor 모닝 브리핑"
+        msg["From"] = CFG["gmail_user"]; msg["To"] = CFG["mail_to"]
+        msg.attach(MIMEText(html, "html", "utf-8"))
         with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as s:
-            s.login(CFG["gmail_user"], CFG["gmail_pw"])
-            s.send_message(msg)
-        log.info("이메일 발송 성공")
-        return True
+            s.login(CFG["gmail_user"], CFG["gmail_pw"]); s.send_message(msg)
+        log.info("이메일 발송 성공"); return True
     except Exception as e:
-        log.error(f"이메일 발송 실패: {e}")
-        return False
+        log.error(f"이메일 발송 실패: {e}"); return False
 
 
-def send_telegram(html: str) -> bool:
-    """텔레그램 봇으로 발송(HTML 일부 태그만 지원되므로 요약 텍스트 변환)."""
+def send_telegram(text: str) -> bool:
     if not (CFG["tg_token"] and CFG["tg_chat"]):
-        log.info("텔레그램 설정 미비 → 발송 생략")
-        return False
+        log.info("텔레그램 설정 미비 → 발송 생략"); return False
     try:
         import requests
-        # 모바일 친화 평문(text)을 그대로 전송. 4096자 한도 → 안전하게 컷
-        resp = requests.post(
-            f"https://api.telegram.org/bot{CFG['tg_token']}/sendMessage",
-            data={"chat_id": CFG["tg_chat"], "text": text[:4000]},
-            timeout=20,
-        )
-        resp.raise_for_status()
-        log.info("텔레그램 발송 성공")
-        return True
+        requests.post(f"https://api.telegram.org/bot{CFG['tg_token']}/sendMessage",
+                      data={"chat_id": CFG["tg_chat"], "text": text[:4000]}, timeout=20).raise_for_status()
+        log.info("텔레그램 발송 성공"); return True
     except Exception as e:
-        log.error(f"텔레그램 발송 실패: {e}")
-        return False
+        log.error(f"텔레그램 발송 실패: {e}"); return False
 
 
 def send_discord(text: str) -> bool:
-    """Discord 채널 웹훅으로 발송. 웹훅 URL 하나만 있으면 됨(토큰 불필요)."""
     if not CFG["discord_webhook"]:
-        log.info("Discord 설정 미비 → 발송 생략")
-        return False
+        log.info("Discord 설정 미비 → 발송 생략"); return False
     try:
         import requests
-        # Discord 본문 한도 2000자. 코드블록으로 감싸면 등간격 폰트라 정렬 유지
-        body = "```\n" + text[:1900] + "\n```"
-        resp = requests.post(
-            CFG["discord_webhook"],
-            json={"content": body},
-            timeout=20,
-        )
-        resp.raise_for_status()
-        log.info("Discord 발송 성공")
-        return True
+        requests.post(CFG["discord_webhook"],
+                      json={"content": "```\n" + text[:1900] + "\n```"}, timeout=20).raise_for_status()
+        log.info("Discord 발송 성공"); return True
     except Exception as e:
-        log.error(f"Discord 발송 실패: {e}")
-        return False
+        log.error(f"Discord 발송 실패: {e}"); return False
 
 
 def send_slack(text: str) -> bool:
-    """Slack Incoming Webhook으로 발송. 웹훅 URL 하나만 있으면 됨."""
     if not CFG["slack_webhook"]:
-        log.info("Slack 설정 미비 → 발송 생략")
-        return False
+        log.info("Slack 설정 미비 → 발송 생략"); return False
     try:
         import requests
-        # Slack도 코드블록(```)으로 감싸 등폭 정렬 유지
-        body = "```\n" + text[:3500] + "\n```"
-        resp = requests.post(
-            CFG["slack_webhook"],
-            json={"text": body},
-            timeout=20,
-        )
-        resp.raise_for_status()
-        log.info("Slack 발송 성공")
-        return True
+        requests.post(CFG["slack_webhook"],
+                      json={"text": "```\n" + text[:3500] + "\n```"}, timeout=20).raise_for_status()
+        log.info("Slack 발송 성공"); return True
     except Exception as e:
-        log.error(f"Slack 발송 실패: {e}")
-        return False
+        log.error(f"Slack 발송 실패: {e}"); return False
 
-
-# ──────────────────────────────────────────────────────────────────
-# 5. 메인 실행
-# ──────────────────────────────────────────────────────────────────
 
 def main():
-    log.info("=" * 50)
-    log.info("Market Mentor 실행 시작")
+    log.info("=" * 50); log.info("Market Mentor 실행 시작")
     try:
-        data = collect_all()                # 데이터 수집
-        html = build_briefing(data)         # 이메일용 HTML 브리핑
-        text = build_text(data)             # 메신저용 모바일 친화 평문
-        # 디버그/백업용 로컬 저장(발송 실패해도 결과 보존)
-        with open("latest_briefing.html", "w", encoding="utf-8") as f:
-            f.write(html)
-        with open("latest_briefing.txt", "w", encoding="utf-8") as f:
-            f.write(text)                   # 메신저 출력 미리보기용
-        sent_mail = send_email(html)        # 메일: HTML
-        sent_tg = send_telegram(text)       # 텔레그램: 평문
-        sent_dc = send_discord(text)        # Discord: 평문(코드블록)
-        sent_sl = send_slack(text)          # Slack: 평문(코드블록)
-        if not (sent_mail or sent_tg or sent_dc or sent_sl):  # 전 채널 실패 시
-            log.warning("발송 채널 없음 → latest_briefing.html 만 생성됨")
-            print("발송 설정이 없습니다. latest_briefing.html 파일을 확인하세요.")
-        else:
-            print("브리핑 발송 완료.")
+        data = collect_all()
+        html = build_briefing(data)
+        text = build_text(data)
+        with open("latest_briefing.html", "w", encoding="utf-8") as f: f.write(html)
+        with open("latest_briefing.txt",  "w", encoding="utf-8") as f: f.write(text)
+        sent = any([send_email(html), send_telegram(text), send_discord(text), send_slack(text)])
+        print("브리핑 발송 완료." if sent else "발송 채널 없음 → latest_briefing.html 만 생성됨.")
         log.info("Market Mentor 실행 종료(정상)")
-    except Exception as e:                  # 최상위 예외 포착(스케줄러 중단 방지)
+    except Exception as e:
         log.critical(f"치명적 오류: {e}", exc_info=True)
-        sys.exit(1)
+        import sys; sys.exit(1)
 
 
 if __name__ == "__main__":
